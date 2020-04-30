@@ -52,8 +52,6 @@ const char HTTP_SNS_GATE_STATUS[] PROGMEM =
   "{s}Gate status {m}%s{e}";
 const char HTTP_SNS_GATE_WARNING[] PROGMEM =
   "{s}Gate warning {m}%s{e}";
-const char HTTP_SNS_ON_PULSE_TIMES[] PROGMEM =
-  "{s}Gate LED times {m}%d, %d, %d, %d, %d, %d, %d, %d, %d, %d  ms{e}";
 #endif // USE_WEBSERVER
 
 const char GATE_STATUS_STR[] PROGMEM =
@@ -66,14 +64,14 @@ const char GATE_WARNING_STR[] PROGMEM =
 #define GATE_FAST_PULSE     150
 #define GATE_LED_WAIT       1275  // Time interval indicating an error state
 #define SENSOR_ERROR_MARGIN 64    // How many milliseconds to allow for error
-#define GATE_LED_WAIT_L     (GATE_LED_WAIT - SENSOR_ERROR_MARGIN)
+#define GATE_LED_WAIT_L     (GATE_LED_WAIT - 280)
 #define GATE_LED_WAIT_H     (GATE_LED_WAIT + SENSOR_ERROR_MARGIN)
 #define GATE_SLOW_PULSE_L   (GATE_SLOW_PULSE - SENSOR_ERROR_MARGIN)
 #define GATE_SLOW_PULSE_H   (GATE_SLOW_PULSE + SENSOR_ERROR_MARGIN)
 #define GATE_FAST_PULSE_L   (GATE_FAST_PULSE - SENSOR_ERROR_MARGIN)
 #define GATE_FAST_PULSE_H   (GATE_FAST_PULSE + SENSOR_ERROR_MARGIN)
 
-#define GATE_PULSE_COUNT    10     // How many pulses to keep track of
+#define GATE_PULSE_COUNT    14     // How many pulses to keep track of
 #define DEBOUNCE_DELAY      60    // How many milliseconds to give for debounce
 
 // Gate states
@@ -173,7 +171,10 @@ void SetGateWarning(uint8_t warning)
 }
 
 bool HasWarning(uint16_t arr[]) {
-  for (uint8_t i = 0; i < GATE_PULSE_COUNT; i++) {
+  if (arr[0] > GATE_LED_WAIT_H || arr[1] > GATE_LED_WAIT_H) {
+    return false;
+  }
+  for (uint8_t i = 2; i < GATE_PULSE_COUNT; i++) {
     if (_is_between(arr[i], GATE_LED_WAIT_L, GATE_LED_WAIT_H)) {
       return true;
     }
@@ -195,7 +196,7 @@ uint8_t GetGateStatus(uint16_t arr[], bool pinState)
     }
   } else {
     if (!HasWarning(arr)) {
-      pulseInterval = LedPulseInterval(arr, HIGH);
+      pulseInterval = LedPulseInterval(arr);
       if (_is_between(pulseInterval,GATE_FAST_PULSE_L,GATE_FAST_PULSE_H)) {
         prevState = GATE_CLOSING;
         return prevState;
@@ -211,8 +212,8 @@ uint8_t GetGateStatus(uint16_t arr[], bool pinState)
 uint8_t GetWarning(uint16_t arr[])
 {
   static uint8_t prevWarning = GATE_WARN_NONE;
-  bool warningState;
-  uint8_t pulseCount;
+  bool warningState = false;
+  uint8_t pulseCount = 0;
   uint16_t pulseTime;
 
   if (!HasWarning(arr)) {
@@ -222,33 +223,30 @@ uint8_t GetWarning(uint16_t arr[])
 
   for (uint8_t i = 2; i < GATE_PULSE_COUNT; i++) {
     if (_is_between(arr[i], GATE_LED_WAIT_L, GATE_LED_WAIT_H)) {
-      warningState = !(i | 1); // If the 2 second pause is on a LOW pin state then count the HIGH pin states
+      warningState = true;
+    } else if (warningState) {
+      if (arr[i] > 0 && arr[i] < GATE_SLOW_PULSE_H) {
+        pulseCount++;
+      } else {
+        break;
+      }
     }
   }
 
-  for (uint16_t i = 2 + warningState; i < GATE_PULSE_COUNT; i = i + 2) {
-    if (pulseTime > 0 && !_is_between(arr[i],pulseTime-SENSOR_ERROR_MARGIN,pulseTime+SENSOR_ERROR_MARGIN)) {
-      break;
-    }
-    pulseTime = arr[i];
-    pulseCount++;
-  }
-
-  // If the pin has been HIGH or low for about GATE_LED_WAIT ms
   switch (pulseCount) {
     case 1:
       prevWarning = GATE_COURTESY_LIGHT_ON;
       return GATE_COURTESY_LIGHT_ON;
       break;
-    case 2:
+    case 3:
       prevWarning = GATE_MAINS_FAILURE;
       return GATE_MAINS_FAILURE;
       break;
-    case 3:
+    case 5:
       prevWarning = GATE_BATTERY_LOW;
       return GATE_BATTERY_LOW;
       break;
-    case 4:
+    case 9:
       prevWarning = GATE_OBSTRUCTION;
       return GATE_OBSTRUCTION;
       break;
@@ -256,21 +254,24 @@ uint8_t GetWarning(uint16_t arr[])
   return prevWarning;
 }
 
-long LedPulseInterval(uint16_t arr[], bool pinState)
+// Get the average time of the pulses.
+// There should be at least 2 pulses before a value is returned.
+long LedPulseInterval(uint16_t arr[])
 {
-  uint16_t pulseTime = 0;
   uint16_t pulseTimeTotal = 0;
   uint8_t pulseCount = 0;
 
-  for (uint16_t i = 2 + pinState; i < GATE_PULSE_COUNT; i = i + 2) {
-    if (pulseTime > 0 && !_is_between(arr[i],pulseTime-SENSOR_ERROR_MARGIN,pulseTime+SENSOR_ERROR_MARGIN)) {
-      return round(pulseTime / pulseCount);
+  for (uint16_t i = 2; i < GATE_PULSE_COUNT; i = i + 2) { // Take the duration of each set of LOW and HIGH states.
+    if (arr[i] == 0 || arr[i] > GATE_LED_WAIT_L || arr[i + 1] == 0 || arr[i + 1] > GATE_LED_WAIT_L) {
+      break;
     }
-    pulseTime = arr[i];
-    pulseTimeTotal += arr[i];
-    pulseCount++;
+    pulseTimeTotal += arr[i] + arr[i + 1];
+    pulseCount += 2;
   }
-  return round(pulseTime / pulseCount);
+  if (pulseCount < 4) {
+    return 0;
+  }
+  return round(pulseTimeTotal / pulseCount);
 }
 
 void RotateUIntArray(uint16_t *arr)
@@ -314,8 +315,6 @@ void GateStatusShow(bool json)
     if (Gate.warnStatus != GATE_WARN_NONE) {
       WSContentSend_PD(HTTP_SNS_GATE_WARNING, gateWarningString);
     }
-    WSContentSend_PD(HTTP_SNS_ON_PULSE_TIMES, Gate.pulseWidths[0], Gate.pulseWidths[1], Gate.pulseWidths[2], Gate.pulseWidths[3], Gate.pulseWidths[4],
-      Gate.pulseWidths[5], Gate.pulseWidths[6], Gate.pulseWidths[7], Gate.pulseWidths[8], Gate.pulseWidths[9]);
 #endif  // USE_WEBSERVER
   }
 }
