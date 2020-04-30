@@ -26,12 +26,12 @@
  * Off                      Gate is closed
  * Slow flash               Gate is opening 300ms
  * Fast flash               Gate is closing 150ms
- * 1 flash per 2 seconds    Courtesy light is permanently on
- * 2 flashes per 2 seconds  Mains failure
- * 3 flashes per 2 seconds  Battery low
- * 4 flashes per 2 seconds  Repeated obstruction
+ * 1 flash per 1300 ms      Courtesy light is permanently on
+ * 2 flashes per 1300 ms    Mains failure
+ * 3 flashes per 1300 ms    Battery low
+ * 4 flashes per 1300 ms    Repeated obstruction
  * 
- * In an error state are looking for a 2 second pulse interval (LED on or LED off)
+ * In an error state are looking for a 1.3 second pulse interval (LED on or LED off)
  * followed by a up to 4 repeated pulses and ending with another 2 second interval.
  * Each warning pulse is about 240ms in duration
 \*********************************************************************************************/
@@ -64,7 +64,7 @@ const char GATE_WARNING_STR[] PROGMEM =
 // Intervals in ms
 #define GATE_SLOW_PULSE     300
 #define GATE_FAST_PULSE     150
-#define GATE_LED_WAIT       2000  // Time interval indicating an error state
+#define GATE_LED_WAIT       1275  // Time interval indicating an error state
 #define SENSOR_ERROR_MARGIN 64    // How many milliseconds to allow for error
 #define GATE_LED_WAIT_L     (GATE_LED_WAIT - SENSOR_ERROR_MARGIN)
 #define GATE_LED_WAIT_H     (GATE_LED_WAIT + SENSOR_ERROR_MARGIN)
@@ -304,7 +304,7 @@ void GateStatusShow(bool json)
   if (json) {
       ResponseAppend_P(PSTR(",\"Gate\":{\"Status\":\"%s\",\"Warning\":\"%s\""), gateStatusString, gateWarningString);
       //if (Gate.stateChanged && (GATE_OPEN == Gate.gateStatus || GATE_CLOSED == Gate.gateStatus)) { // Append the pulse timings if the gate is open or closed
-        ResponseAppend_P(PSTR(",\"Timings\":{%d,%d,%d,%d,%d,%d,%d,%d,%d,%d}"), Gate.pulseWidths[0], Gate.pulseWidths[1], Gate.pulseWidths[2], Gate.pulseWidths[3], Gate.pulseWidths[4],
+        ResponseAppend_P(PSTR(",\"Timings\":[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]"), Gate.pulseWidths[0], Gate.pulseWidths[1], Gate.pulseWidths[2], Gate.pulseWidths[3], Gate.pulseWidths[4],
           Gate.pulseWidths[5], Gate.pulseWidths[6], Gate.pulseWidths[7], Gate.pulseWidths[8], Gate.pulseWidths[9]);
       //}
       ResponseAppend_P(PSTR("}"));
