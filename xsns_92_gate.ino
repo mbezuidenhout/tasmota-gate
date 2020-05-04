@@ -71,8 +71,7 @@ const char GATE_WARNING_STR[] PROGMEM =
 #define GATE_FAST_PULSE_L   (GATE_FAST_PULSE - SENSOR_ERROR_MARGIN)
 #define GATE_FAST_PULSE_H   (GATE_FAST_PULSE + SENSOR_ERROR_MARGIN)
 
-#define GATE_PULSE_COUNT    14     // How many pulses to keep track of
-#define DEBOUNCE_DELAY      60    // How many milliseconds to give for debounce
+#define GATE_PULSE_COUNT    12     // How many pulses to keep track of
 
 // Gate states
 #define GATE_UNKNOWN_STATE  0
@@ -89,67 +88,52 @@ const char GATE_WARNING_STR[] PROGMEM =
 #define GATE_BATTERY_LOW       3
 #define GATE_OBSTRUCTION       4
 
+#ifndef ARDUINO_ESP8266_RELEASE_2_3_0      // Fix core 2.5.x ISR not in IRAM Exception
+void GateStatusRead(void) ICACHE_RAM_ATTR;
+void AddPulse(volatile uint16_t *arr, bool pinState, uint32_t pulseWidth) ICACHE_RAM_ATTR;
+void RotateUIntArray(volatile uint16_t *arr) ICACHE_RAM_ATTR;
+#endif  // ARDUINO_ESP8266_RELEASE_2_3_0
+
+volatile uint16_t pulseWidths[GATE_PULSE_COUNT]; // even numbers are pin LOW odd numbers HIGH
+
 struct GATE {
   bool enabled            = true;
   bool stateChanged       = false;
   uint8_t gateStatus      = GATE_UNKNOWN_STATE;
   uint8_t warnStatus      = GATE_WARN_NONE;
-  uint16_t pulseWidths[GATE_PULSE_COUNT]; // even numbers are pin LOW odd numbers HIGH
 } Gate;
 
-bool Debounce(bool pinState) {
-  static bool newPinState = LOW;
-  static bool lastPinState = LOW;
-  static unsigned long lastDebounceTime = millis();
-
-  if (pinState != newPinState) {
-    lastDebounceTime = millis();
-    newPinState = pinState;
-  }
-  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY && lastPinState != pinState ) {
-    lastPinState = pinState;
-  }
-  return lastPinState;
-}
-
-void AddPulse(uint16_t *arr, bool pinState) {
-  static unsigned long startMs;
+void AddPulse(volatile uint16_t *arr, bool pinState, uint32_t pulseWidth) {
   static bool prevPinState = LOW;
-  unsigned long now = millis();
-  unsigned long pulseWidth;
-
-  if (now < startMs) { // handle unsigned long rollover
-    startMs = now;
-  }
-  pulseWidth = now - startMs;
 
   if (pulseWidth > UINT16_MAX) { // Cap pulseWidth to UINT16_MAX or 65.5 seconds
     pulseWidth = UINT16_MAX;
   }
 
-  if (pinState != prevPinState) {
-    Gate.pulseWidths[prevPinState] = pulseWidth;
-    prevPinState = pinState;
-    startMs = now;
-    if (HIGH == pinState) {
-      RotateUIntArray(&Gate.pulseWidths[0]);
-      Gate.pulseWidths[LOW] = 0;
-      Gate.pulseWidths[HIGH] = 0;
-    }
-  } else {
-    Gate.pulseWidths[pinState] = pulseWidth;
+  pulseWidths[pinState] = pulseWidth;
+  if (HIGH == pinState && LOW == prevPinState) {
+    RotateUIntArray(&pulseWidths[0]);
+    pulseWidths[LOW] = 0;
+    pulseWidths[HIGH] = 0;
   }
+  prevPinState = pinState;
 }
 
 void GateStatusRead(void)
 {
-  bool pinState;
-  
-  pinState = Debounce(digitalRead(pin[GPIO_GATE1_NP]));
+  static bool newPinState = LOW;
+  static uint32_t lastDebounceTime = millis();
 
-  AddPulse(&Gate.pulseWidths[0], pinState);
-  SetGateStatus(GetGateStatus(Gate.pulseWidths, pinState));
-  SetGateWarning(GetWarning(Gate.pulseWidths));
+  if (millis() - lastDebounceTime > Settings.button_debounce) {
+    AddPulse(&pulseWidths[0], newPinState, millis() - lastDebounceTime);    
+    SetGateStatus(GetGateStatus(pulseWidths, newPinState));
+    SetGateWarning(GetWarning(pulseWidths));
+  }
+
+  if (newPinState != digitalRead(pin[GPIO_GATE1_NP])) {
+    lastDebounceTime = millis();
+    newPinState = !newPinState;
+  }
 }
 
 void SetGateStatus(uint8_t status)
@@ -170,7 +154,7 @@ void SetGateWarning(uint8_t warning)
   }
 }
 
-bool HasWarning(uint16_t arr[]) {
+bool HasWarning(volatile uint16_t arr[]) {
   if (arr[0] > GATE_LED_WAIT_H || arr[1] > GATE_LED_WAIT_H) {
     return false;
   }
@@ -182,16 +166,18 @@ bool HasWarning(uint16_t arr[]) {
   return false;
 }
 
-uint8_t GetGateStatus(uint16_t arr[], bool pinState)
+uint8_t GetGateStatus(volatile uint16_t arr[], bool pinState)
 {
   static uint8_t prevState = GATE_UNKNOWN_STATE;
   uint16_t pulseInterval;
   if (arr[pinState] > GATE_SLOW_PULSE_H) {
     if (pinState == HIGH) {
       prevState = GATE_OPEN;
+      sleep = Settings.sleep;
       return prevState;
     } else {
       prevState = GATE_CLOSED;
+      sleep = Settings.sleep;
       return prevState;
     }
   } else {
@@ -209,7 +195,7 @@ uint8_t GetGateStatus(uint16_t arr[], bool pinState)
   return prevState;
 }
 
-uint8_t GetWarning(uint16_t arr[])
+uint8_t GetWarning(volatile uint16_t arr[])
 {
   static uint8_t prevWarning = GATE_WARN_NONE;
   bool warningState = false;
@@ -246,7 +232,7 @@ uint8_t GetWarning(uint16_t arr[])
       prevWarning = GATE_BATTERY_LOW;
       return GATE_BATTERY_LOW;
       break;
-    case 9:
+    case 7:
       prevWarning = GATE_OBSTRUCTION;
       return GATE_OBSTRUCTION;
       break;
@@ -256,7 +242,7 @@ uint8_t GetWarning(uint16_t arr[])
 
 // Get the average time of the pulses.
 // There should be at least 2 pulses before a value is returned.
-long LedPulseInterval(uint16_t arr[])
+uint16_t LedPulseInterval(volatile uint16_t arr[])
 {
   uint16_t pulseTimeTotal = 0;
   uint8_t pulseCount = 0;
@@ -271,10 +257,10 @@ long LedPulseInterval(uint16_t arr[])
   if (pulseCount < 4) {
     return 0;
   }
-  return round(pulseTimeTotal / pulseCount);
+  return (uint16_t) round(pulseTimeTotal / pulseCount);
 }
 
-void RotateUIntArray(uint16_t *arr)
+void RotateUIntArray(volatile uint16_t *arr)
 {
   for (uint8_t i = GATE_PULSE_COUNT - 1; i > 1; i--) {
     arr[i] = arr[i - 2];
@@ -287,6 +273,10 @@ void GateStatusInit(void)
   if (pin[GPIO_GATE1_NP] < 99) {
     Gate.enabled = true;
     pinMode(pin[GPIO_GATE1_NP], INPUT);
+    AddPulse(&pulseWidths[0], digitalRead(pin[GPIO_GATE1_NP]), UINT16_MAX);
+    attachInterrupt(digitalPinToInterrupt(pin[GPIO_GATE1_NP]), GateStatusRead, CHANGE);
+
+    GateStatusRead();
   }
 /*  if (pin[GPIO_GATE1_TRG] < 99) {
     pinMode(pin[GPIO_GATE1_TRG], OUTPUT);
@@ -305,8 +295,8 @@ void GateStatusShow(bool json)
   if (json) {
       ResponseAppend_P(PSTR(",\"Gate\":{\"Status\":\"%s\",\"Warning\":\"%s\""), gateStatusString, gateWarningString);
       //if (Gate.stateChanged && (GATE_OPEN == Gate.gateStatus || GATE_CLOSED == Gate.gateStatus)) { // Append the pulse timings if the gate is open or closed
-        ResponseAppend_P(PSTR(",\"Timings\":[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]"), Gate.pulseWidths[0], Gate.pulseWidths[1], Gate.pulseWidths[2], Gate.pulseWidths[3], Gate.pulseWidths[4],
-          Gate.pulseWidths[5], Gate.pulseWidths[6], Gate.pulseWidths[7], Gate.pulseWidths[8], Gate.pulseWidths[9]);
+        ResponseAppend_P(PSTR(",\"Timings\":[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]"), pulseWidths[0], pulseWidths[1], pulseWidths[2], pulseWidths[3], pulseWidths[4],
+          pulseWidths[5], pulseWidths[6], pulseWidths[7], pulseWidths[8], pulseWidths[9]);
       //}
       ResponseAppend_P(PSTR("}"));
 #ifdef USE_WEBSERVER
@@ -336,10 +326,11 @@ bool Xsns92(uint8_t function)
         if (Gate.stateChanged && GATE_UNKNOWN_STATE != Gate.gateStatus) {
           MqttPublishSensor();
           Gate.stateChanged = false;
+        } else {
+          sleep = Settings.sleep;
         }
-        sleep = 0;
         break;
-      case FUNC_EVERY_50_MSECOND:
+      case FUNC_EVERY_SECOND:
         GateStatusRead();
         break;
       case FUNC_JSON_APPEND:
